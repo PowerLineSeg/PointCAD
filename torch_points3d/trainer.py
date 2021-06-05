@@ -1,4 +1,5 @@
 import os
+import sys
 import copy
 import torch
 import hydra
@@ -43,6 +44,11 @@ class Hard_Mining_Status:
 		self.Class_IoU = np.zeros([self.Class_Num,1])
 		self.Instance_IoU = np.zeros([self.Sample_Num,1])
 		self.Instance_Class_IoU = np.zeros([self.Sample_Num,self.Class_Num])
+		
+		self.root_path = os.path.abspath(os.path.join(sys.argv[0],"../Log_performance"))
+		
+		if not os.path.exists(self.root_path):
+			os.makedirs(self.root_path)
 	
 	def __str__(self):
 		print(self.Conf_Mat)
@@ -57,14 +63,19 @@ class Hard_Mining_Status:
 		self.Instance_IoU -= self.Instance_IoU
 		self.Instance_Class_IoU -= self.Instance_Class_IoU
 		
-	def set(self,Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU):
+	def set(self,Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU,Epoch=-1):
 		self.reset()
 		self.Conf_Mat = Conf_Mat
 		self.Class_IoU = Class_IoU
 		self.Instance_IoU = Instance_IoU
-		self.Instance_Class_IoU = Instance_Class_IoU		
+		self.Instance_Class_IoU = Instance_Class_IoU
 		
+		Ins_IoU_filename = os.path.join(self.root_path, "Instance_IoU_Epoch_%04d.txt"%(Epoch))
+		Class_IoU_filename = os.path.join(self.root_path, "Class_IoU_Epoch_%04d.txt"%(Epoch))
 		
+		if Epoch>=0:
+			np.savetxt(Ins_IoU_filename,self.Instance_IoU,fmt="%.4f")
+			np.savetxt(Class_IoU_filename,self.Class_IoU,fmt="%.4f")		
 		
 
 class Trainer:
@@ -226,6 +237,38 @@ class Trainer:
             if self._tracker._stage == "train":
                 log.info("Learning rate = %f" % self._model.learning_rate)
 
+    def get_intersection_union_per_class(self, confusion_matrix):
+    	TP_plus_FN = np.sum(confusion_matrix, axis=0)
+    	TP_plus_FP = np.sum(confusion_matrix, axis=1)
+    	TP = np.diagonal(confusion_matrix)
+    	union = TP_plus_FN + TP_plus_FP - TP
+    	iou = 1e-8 + TP / (union + 1e-8)
+    	existing_class_mask = union > 1e-3
+    	return iou, existing_class_mask
+
+    def _count_confusion_matrix(self, ground_truth_vec, predicted):
+    	number_of_labels = self._tracker._confusion_matrix.number_of_labels
+    	assert np.max(predicted) < number_of_labels
+    	if torch.is_tensor(ground_truth_vec):
+    		ground_truth_vec = ground_truth_vec.numpy()
+    	if torch.is_tensor(predicted):
+    		predicted = predicted.numpy()    	
+    	batch_confusion = np.bincount(number_of_labels * ground_truth_vec.astype(int) + predicted, minlength=number_of_labels ** 2).reshape(number_of_labels, number_of_labels)
+    	
+    	return batch_confusion
+    
+    def _get_cur_confusion_matrix(self):
+    	outputs = self._model.get_output()
+    	labels = self._model.get_labels()
+    	mask = labels != self._tracker._ignore_label
+    	outputs = outputs[mask]
+    	labels = labels[mask]
+    	outputs = self._tracker._convert(outputs)
+    	labels = self._tracker._convert(labels)
+    	predicts = np.argmax(outputs, 1)
+    	batch_confusion = self._count_confusion_matrix(labels, predicts)
+    	return batch_confusion
+    
     def _train_epoch(self, epoch: int):
 
         self._model.train()
@@ -270,6 +313,7 @@ class Trainer:
     def update_hard_mining_status(self, epoch):
         Instance_Conf_Mat = []
         Instance_Class_IoU = []
+        Instance_Class_Mask = []
         
         
         self._tracker.reset("val")    	
@@ -289,25 +333,46 @@ class Trainer:
         			self._model.set_input(data, self._device)
         			self._model.forward(epoch=epoch)
         			self._tracker.track(self._model, data=data, **self.tracker_options)
-          		
-        			Instance_Class_IoU.append(self._tracker._confusion_matrix.get_intersection_union_per_class()[0])
+        			
+        			#Compute current instance confusion matrix
+        			cur_confusion_matrix = self._get_cur_confusion_matrix()
+        			#Compute current Class_IoU and Mask
+        			Cur_Class_IoU, Cur_Class_Mask = self.get_intersection_union_per_class(cur_confusion_matrix)
+        			Instance_Class_IoU.append(Cur_Class_IoU)
+        			Instance_Class_Mask.append(Cur_Class_Mask)
+        			Instance_Conf_Mat.append(cur_confusion_matrix)        			
+        			
+        			'''
+        			Cur_Class_IoU, Cur_Class_Mask = self._tracker._confusion_matrix.get_intersection_union_per_class()
+        			Instance_Class_IoU.append(Cur_Class_IoU)
+        			Instance_Class_Mask.append(Cur_Class_Mask)
         			Instance_Conf_Mat.append(self._tracker._confusion_matrix.get_confusion_matrix())
-                      		
+        			print(self._tracker._confusion_matrix.get_confusion_matrix())
+        			'''
+        			        		
         #Instance Class IoU
         Instance_Class_IoU = np.array(Instance_Class_IoU)
         Instance_Conf_Mat = np.array(Instance_Conf_Mat)
+        Instance_Class_Mask = np.array(Instance_Class_Mask).astype(int)
+        
         
         #2 Class Wise IoU
-        Class_IoU = np.mean(Instance_Class_IoU, axis = 0)
+        Class_IoU = np.sum(Instance_Class_IoU, axis = 0)
+        Class_Mask_Cnt = np.sum(Instance_Class_Mask, axis = 0)
+        Class_IoU = Class_IoU/Class_Mask_Cnt
+        
         
         #3 Instance Wise IoU
-        Instance_IoU = np.mean(Instance_Class_IoU, axis = 1)
+        Instance_IoU = np.sum(Instance_Class_IoU, axis = 1)
+        Instance_Mask_Cnt = np.sum(Instance_Class_Mask, axis = 1)
+        Instance_IoU = Instance_IoU / Instance_Mask_Cnt
+        
         Conf_Mat = np.sum(Instance_Conf_Mat, axis = 0) + 1
         
         #1 Confusion Matrix
         Conf_Mat = Conf_Mat / np.expand_dims(np.sum(Conf_Mat, axis=1), axis = 1)
         
-        self._hard_mining_status.set(Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU)
+        self._hard_mining_status.set(Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU,epoch)
                 
         '''
         print(Conf_Mat.shape)

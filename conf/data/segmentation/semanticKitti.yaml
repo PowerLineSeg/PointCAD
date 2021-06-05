@@ -2,14 +2,14 @@
 class: semantickitti.SemanticKittiDataset
 dataset_name: "kitti"
 task: segmentation
-dataroot: data
+dataroot: /workspace/lyh/dataset/SemanticKITTI/dataset/selected_kitti
 grid_size: 0.1
 process_workers: 8
 apply_rotation: True
 mode: "last"
 
 train_transform:
-  - transform: ElasticDistortion
+#  - transform: ElasticDistortion
   - transform: Random3AxisRotation
     params:
       apply_rotation: ${data.apply_rotation}

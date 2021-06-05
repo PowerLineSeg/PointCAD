@@ -14,6 +14,8 @@ from torch_points3d.core.data_transform import instantiate_transforms, MultiScal
 from torch_points3d.core.data_transform import instantiate_filters
 from torch_points3d.datasets.batch import SimpleBatch
 from torch_points3d.datasets.multiscale_data import MultiScaleBatch
+from torch_points3d.datasets.samplers import Hard_Mining_Sampler
+
 from torch_points3d.utils.enums import ConvolutionFormat
 from torch_points3d.utils.config import ConvolutionFormatFactory
 from torch_points3d.utils.colors import COLORS, colored_print
@@ -197,15 +199,19 @@ class BaseDataset:
         shuffle: bool,
         num_workers: int,
         precompute_multi_scale: bool,
+        hard_mining_status
     ):
         """ Creates the data loaders. Must be called in order to complete the setup of the Dataset
         """
         conv_type = model.conv_type
         self._batch_size = batch_size
 
+        self.train_sampler = Hard_Mining_Sampler(hard_mining_status)
+        
         if self.train_sampler:
             log.info(self.train_sampler)
-
+        
+        
         if self.train_dataset:
             self._train_loader = self._dataloader(
                 self.train_dataset,
@@ -216,6 +222,18 @@ class BaseDataset:
                 shuffle=shuffle and not self.train_sampler,
                 num_workers=num_workers,
                 sampler=self.train_sampler,
+            )
+
+        if self.train_dataset:
+            self._hard_mining_loader = self._dataloader(
+                self.train_dataset,
+                self.train_pre_batch_collate_transform,
+                conv_type,
+                precompute_multi_scale,
+                batch_size=1,
+                shuffle=False and not self.train_sampler,
+                num_workers=num_workers,
+                sampler=None,
             )
 
         if self.test_dataset:

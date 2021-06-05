@@ -4,6 +4,7 @@ import torch
 import hydra
 import time
 import logging
+import numpy as np
 
 from tqdm.auto import tqdm
 import wandb
@@ -29,6 +30,43 @@ from torch_points3d.visualization import Visualizer
 log = logging.getLogger(__name__)
 
 
+class Hard_Mining_Status:
+	"""
+	This Class is used to save the training status of current epoch
+	"""
+	
+	def __init__(self, Class_Num=19, Sample_Num=1800):
+		self.Class_Num = Class_Num
+		self.Sample_Num = Sample_Num
+		
+		self.Conf_Mat = np.zeros([self.Class_Num,self.Class_Num])
+		self.Class_IoU = np.zeros([self.Class_Num,1])
+		self.Instance_IoU = np.zeros([self.Sample_Num,1])
+		self.Instance_Class_IoU = np.zeros([self.Sample_Num,self.Class_Num])
+	
+	def __str__(self):
+		print(self.Conf_Mat)
+		print(self.Class_IoU)
+		print(self.Instance_IoU)
+		print("mIoU = %.3f"%(np.mean(self.Instance_Class_IoU)))
+		return ' '
+	
+	def reset(self):
+		self.Conf_Mat -= self.Conf_Mat
+		self.Class_IoU -= self.Class_IoU
+		self.Instance_IoU -= self.Instance_IoU
+		self.Instance_Class_IoU -= self.Instance_Class_IoU
+		
+	def set(self,Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU):
+		self.reset()
+		self.Conf_Mat = Conf_Mat
+		self.Class_IoU = Class_IoU
+		self.Instance_IoU = Instance_IoU
+		self.Instance_Class_IoU = Instance_Class_IoU		
+		
+		
+		
+
 class Trainer:
     """
     TorchPoints3d Trainer handles the logic between
@@ -44,6 +82,9 @@ class Trainer:
         self._initialize_trainer()
 
     def _initialize_trainer(self):
+        #init Hard_Mining_Status
+        self._hard_mining_status = Hard_Mining_Status(19,1800)
+        
         # Enable CUDNN BACKEND
         torch.backends.cudnn.enabled = self.enable_cudnn
 
@@ -112,9 +153,10 @@ class Trainer:
             self._cfg.training.shuffle,
             self._cfg.training.num_workers,
             self.precompute_multi_scale,
+            self._hard_mining_status
         )
         log.info(self._dataset)
-
+        
         # Verify attributes in dataset
         self._model.verify_data(self._dataset.train_dataset[0])
 
@@ -135,10 +177,14 @@ class Trainer:
 
     def train(self):
         self._is_training = True
-
+        
         for epoch in range(self._checkpoint.start_epoch, self._cfg.training.epochs):
             log.info("EPOCH %i / %i", epoch, self._cfg.training.epochs)
-
+            
+            self.update_hard_mining_status(epoch)
+            #print(self._hard_mining_status)
+            #exit()
+            
             self._train_epoch(epoch)
 
             if self.profiling:
@@ -218,6 +264,60 @@ class Trainer:
                         return 0
 
         self._finalize_epoch(epoch)
+
+    
+    #This method is used to compute the property for hard mining
+    def update_hard_mining_status(self, epoch):
+        Instance_Conf_Mat = []
+        Instance_Class_IoU = []
+        
+        
+        self._tracker.reset("val")    	
+        self._model.eval()
+        if self.enable_dropout:
+        	self._model.enable_dropout_in_eval()    	
+        
+        train_loader = self._dataset._hard_mining_loader
+        iter_data_time = time.time()
+        with Ctq(train_loader) as tq_train_loader:
+        	for i, data in enumerate(tq_train_loader):
+        		#if i > 50:
+        		#	break
+        		t_data = time.time() - iter_data_time
+        		iter_start_time = time.time()
+        		with torch.no_grad():
+        			self._model.set_input(data, self._device)
+        			self._model.forward(epoch=epoch)
+        			self._tracker.track(self._model, data=data, **self.tracker_options)
+          		
+        			Instance_Class_IoU.append(self._tracker._confusion_matrix.get_intersection_union_per_class()[0])
+        			Instance_Conf_Mat.append(self._tracker._confusion_matrix.get_confusion_matrix())
+                      		
+        #Instance Class IoU
+        Instance_Class_IoU = np.array(Instance_Class_IoU)
+        Instance_Conf_Mat = np.array(Instance_Conf_Mat)
+        
+        #2 Class Wise IoU
+        Class_IoU = np.mean(Instance_Class_IoU, axis = 0)
+        
+        #3 Instance Wise IoU
+        Instance_IoU = np.mean(Instance_Class_IoU, axis = 1)
+        Conf_Mat = np.sum(Instance_Conf_Mat, axis = 0) + 1
+        
+        #1 Confusion Matrix
+        Conf_Mat = Conf_Mat / np.expand_dims(np.sum(Conf_Mat, axis=1), axis = 1)
+        
+        self._hard_mining_status.set(Conf_Mat,Class_IoU,Instance_IoU,Instance_Class_IoU)
+                
+        '''
+        print(Conf_Mat.shape)
+        print(Class_IoU.shape)
+        print(Instance_IoU.shape)
+        print(Instance_Class_IoU.shape)
+        exit()
+        '''
+        	
+        	
 
     def _test_epoch(self, epoch, stage_name: str):
         voting_runs = self._cfg.get("voting_runs", 1)

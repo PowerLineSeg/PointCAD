@@ -4,12 +4,8 @@ import numpy as np
 import multiprocessing
 import logging
 import torch
-import pickle
-import traceback
-from itertools import repeat, product
-import time
 
-from torch_geometric.data import InMemoryDataset, Data
+from torch_geometric.data import Dataset, Data
 
 from torch_points3d.datasets.base_dataset import BaseDataset
 from torch_points3d.datasets.segmentation.kitti_config import *
@@ -19,7 +15,7 @@ from torch_points3d.metrics.segmentation_tracker import SegmentationTracker
 log = logging.getLogger(__name__)
 
 
-class SemanticKitti(InMemoryDataset):
+class SemanticKitti(Dataset):
     r"""SemanticKITTI: A Dataset for Semantic Scene Understanding of LiDAR Sequences"
     from the <https://arxiv.org/pdf/1904.01416.pdf> paper, 
     containing about 21 lidar scan sequences with dense point-wise annotations.
@@ -68,7 +64,6 @@ class SemanticKitti(InMemoryDataset):
         self.process_workers = process_workers
 
         super().__init__(root, transform=transform, pre_transform=pre_transform)
-        '''
         if split == "train":
             self._scans = glob(os.path.join(self.processed_paths[0], "*.pt"))
         elif split == "val":
@@ -81,21 +76,6 @@ class SemanticKitti(InMemoryDataset):
             )
         else:
             raise ValueError("Split %s not recognised" % split)
-        '''
-        
-        if split == "train":
-            filename = os.path.join(self.processed_paths[0], "train.pt")
-        elif split == "val":
-            filename = os.path.join(self.processed_paths[1], "val.pt")
-        elif split == "test":
-            filename = os.path.join(self.processed_paths[2], "test.pt")
-        
-        print("load %s"%(filename))
-        self.data, self.slices = torch.load(filename)
-
-        self._scans = []
-        for iter in range(self.slices['x'].shape[0]):
-        	self._scans.append("hehe")
 
     @property
     def raw_file_names(self):
@@ -142,43 +122,12 @@ class SemanticKitti(InMemoryDataset):
         if transform:
             data = transform(data)
         log.info("Processed file %s, nb points = %i", os.path.basename(out_file), data.pos.shape[0])
-        #torch.save(data, out_file)
-        return data
+        torch.save(data, out_file)
 
-    '''
     def get(self, idx):
         data = torch.load(self._scans[idx])
         if data.y is not None:
             data.y = self._remap_labels(data.y)
-        return data
-    '''
-    
-    def get(self, idx):
-        s_t = time.time()
-        data = self.data.__class__()
-
-        if hasattr(self.data, '__num_nodes__'):
-            data.num_nodes = self.data.__num_nodes__[idx]
-
-        for key in self.data.keys:
-            item, slices = self.data[key], self.slices[key]
-            start, end = slices[idx].item(), slices[idx + 1].item()
-            # print(slices[idx], slices[idx + 1])
-            if torch.is_tensor(item):
-                s = list(repeat(slice(None), item.dim()))
-                s[self.data.__cat_dim__(key, item)] = slice(start, end)
-            elif start + 1 == end:
-                s = slices[start]
-            else:
-                s = slice(start, end)
-            data[key] = item[s]
-        
-        if data.y is not None:
-            data.y = self._remap_labels(data.y)
-        
-        e_t = time.time()
-        
-        #print("load data cost %.3f"%(e_t - s_t))
         return data
 
     def process(self):
@@ -195,27 +144,17 @@ class SemanticKitti(InMemoryDataset):
                 seq, _, scan_id = scan.split(os.path.sep)[-3:]
                 scan_names.append("{}_{}".format(seq, scan_id))
 
-            out_filename = self.processed_paths[i].split('/')[-1]
-            out_filename = os.path.join(self.processed_paths[i], "%s.pt"%(out_filename))
-            
             out_files = [os.path.join(self.processed_paths[i], "{}.pt".format(scan_name)) for scan_name in scan_names]
             args = zip(scan_paths, label_paths, [self.pre_transform for i in range(len(scan_paths))], out_files)
-            
-            #if self.use_multiprocessing:
-            data_list = []
-            if False:
+            if self.use_multiprocessing:
                 with multiprocessing.Pool(processes=self.process_workers) as pool:
                     pool.starmap(self.process_one, args)
             else:
                 for arg in args:
-                    data_list.append(self.process_one(*arg))
-            
-            data, slices = self.collate(data_list)
-            torch.save((data, slices), out_filename)
-            print("%s in memory saved"%(out_filename))
-            
-    #def len(self):
-    #    return len(self._scans)
+                    self.process_one(*arg)
+
+    def len(self):
+        return len(self._scans)
 
     def download(self):
         if len(os.listdir(self.raw_dir)) == 0:

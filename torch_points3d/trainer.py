@@ -193,6 +193,7 @@ class Trainer:
             log.info("EPOCH %i / %i", epoch, self._cfg.training.epochs)
             
             self.update_hard_mining_status(epoch)
+            
             #print(self._hard_mining_status)
             #exit()
             
